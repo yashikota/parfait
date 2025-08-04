@@ -3,5 +3,5 @@
 ## Install
 
 ```sh
-go install github.com/yashikota/parfait
+go install github.com/yashikota/parfait@latest
 ```
