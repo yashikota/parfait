@@ -164,7 +164,7 @@ func createCombinedVideo(outputDir, language string) error {
 	}
 	file.Close()
 
-	outputFile := filepath.Join(outputDir, fmt.Sprintf("%s.mp4", language))
+	outputFile := filepath.Join(outputDir, fmt.Sprintf("video-%s.mp4", language))
 
 	// Small delay to ensure file is written
 	time.Sleep(time.Second)
