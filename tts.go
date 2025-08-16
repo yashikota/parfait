@@ -68,7 +68,7 @@ func (m *APIKeyManager) ResetIndex() {
 	m.index = 0
 }
 
-// writeWAVFile saves raw PCM bytes as a WAV file
+// writeWAVFile saves raw PCM bytes as a WAV file with 1 second of silence added at the end
 func writeWAVFile(filename string, pcmData []byte, channels, sampleRate, bitsPerSample int) error {
 	file, err := os.Create(filename)
 	if err != nil {
@@ -76,8 +76,18 @@ func writeWAVFile(filename string, pcmData []byte, channels, sampleRate, bitsPer
 	}
 	defer file.Close()
 
-	// Calculate sizes
-	dataSize := len(pcmData)
+	// Add 1 second of silence (zeros) to the end of the audio
+	silenceDuration := 1.0 // 1 second
+	silenceSamples := int(float64(sampleRate) * silenceDuration)
+	silenceBytes := silenceSamples * channels * (bitsPerSample / 8)
+	silenceData := make([]byte, silenceBytes)
+	// silenceData is already zero-filled by default
+
+	// Combine original audio with silence
+	combinedData := append(pcmData, silenceData...)
+
+	// Calculate sizes with the added silence
+	dataSize := len(combinedData)
 	fileSize := 36 + dataSize
 
 	// Write WAV header
@@ -102,8 +112,8 @@ func writeWAVFile(filename string, pcmData []byte, channels, sampleRate, bitsPer
 	file.WriteString("data")
 	binary.Write(file, binary.LittleEndian, uint32(dataSize))
 
-	// Write PCM data
-	_, err = file.Write(pcmData)
+	// Write combined PCM data (original + silence)
+	_, err = file.Write(combinedData)
 	return err
 }
 
