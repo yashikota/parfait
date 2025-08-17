@@ -118,7 +118,7 @@ func writeWAVFile(filename string, pcmData []byte, channels, sampleRate, bitsPer
 }
 
 // runTTSGeneration handles TTS generation from notes files
-func runTTSGeneration(ctx context.Context) error {
+func runTTSGeneration(ctx context.Context, workDir string) error {
 	// Initialize API key manager
 	keyManager, err := NewAPIKeyManager()
 	if err != nil {
@@ -126,8 +126,8 @@ func runTTSGeneration(ctx context.Context) error {
 	}
 
 	// Create audio output directories
-	jaAudioDir := filepath.Join("dist", "ja")
-	enAudioDir := filepath.Join("dist", "en")
+	jaAudioDir := filepath.Join(workDir, "dist", "ja")
+	enAudioDir := filepath.Join(workDir, "dist", "en")
 	if err := os.MkdirAll(jaAudioDir, 0755); err != nil {
 		return fmt.Errorf("failed to create Japanese audio directory: %v", err)
 	}
@@ -144,7 +144,7 @@ func runTTSGeneration(ctx context.Context) error {
 
 	// Process Japanese notes in parallel
 	go func() {
-		jaNotesFile := filepath.Join("dist", "ja", "notes-ja.txt")
+		jaNotesFile := filepath.Join(workDir, "dist", "ja", "notes-ja.txt")
 		if _, err := os.Stat(jaNotesFile); err == nil {
 			fmt.Println("Processing Japanese notes...")
 			err := processTTSFile(ctx, keyManager, jaNotesFile, jaAudioDir, "ja")
@@ -160,7 +160,7 @@ func runTTSGeneration(ctx context.Context) error {
 
 	// Process English notes in parallel
 	go func() {
-		enNotesFile := filepath.Join("dist", "en", "notes-en.txt")
+		enNotesFile := filepath.Join(workDir, "dist", "en", "notes-en.txt")
 		if _, err := os.Stat(enNotesFile); err == nil {
 			fmt.Println("Processing English notes...")
 			err := processTTSFile(ctx, keyManager, enNotesFile, enAudioDir, "en")

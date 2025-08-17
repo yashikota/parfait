@@ -8,23 +8,28 @@ import (
 )
 
 // runMarpGeneration handles the Marp generation workflow
-func runMarpGeneration() error {
+func runMarpGeneration(workDir string) error {
 	fmt.Println("Starting Marp generation...")
 
 	// Check if slide files exist
-	if _, err := os.Stat("slide-ja.md"); os.IsNotExist(err) {
-		return fmt.Errorf("slide-ja.md not found")
+	slideJaPath := filepath.Join(workDir, "slide-ja.md")
+	slideEnPath := filepath.Join(workDir, "slide-en.md")
+
+	if _, err := os.Stat(slideJaPath); os.IsNotExist(err) {
+		return fmt.Errorf("slide-ja.md not found in %s", workDir)
 	}
-	if _, err := os.Stat("slide-en.md"); os.IsNotExist(err) {
-		return fmt.Errorf("slide-en.md not found")
+	if _, err := os.Stat(slideEnPath); os.IsNotExist(err) {
+		return fmt.Errorf("slide-en.md not found in %s", workDir)
 	}
 
 	// Ensure dist directories exist
-	if err := os.MkdirAll("dist/ja", 0755); err != nil {
-		return fmt.Errorf("failed to create dist/ja directory: %v", err)
+	jaDistDir := filepath.Join(workDir, "dist", "ja")
+	enDistDir := filepath.Join(workDir, "dist", "en")
+	if err := os.MkdirAll(jaDistDir, 0755); err != nil {
+		return fmt.Errorf("failed to create %s directory: %v", jaDistDir, err)
 	}
-	if err := os.MkdirAll("dist/en", 0755); err != nil {
-		return fmt.Errorf("failed to create dist/en directory: %v", err)
+	if err := os.MkdirAll(enDistDir, 0755); err != nil {
+		return fmt.Errorf("failed to create %s directory: %v", enDistDir, err)
 	}
 
 	// Use channels for parallel processing
@@ -37,14 +42,14 @@ func runMarpGeneration() error {
 	// Process Japanese Marp generation in parallel
 	go func() {
 		fmt.Println("Processing Japanese Marp files...")
-		err := generateMarpFiles("ja")
+		err := generateMarpFiles("ja", workDir)
 		resultChan <- result{"ja", err}
 	}()
 
 	// Process English Marp generation in parallel
 	go func() {
 		fmt.Println("Processing English Marp files...")
-		err := generateMarpFiles("en")
+		err := generateMarpFiles("en", workDir)
 		resultChan <- result{"en", err}
 	}()
 
@@ -75,9 +80,9 @@ func runMarpGeneration() error {
 }
 
 // generateMarpFiles generates all Marp outputs for a specific language
-func generateMarpFiles(lang string) error {
-	slideFile := fmt.Sprintf("slide-%s.md", lang)
-	distDir := filepath.Join("dist", lang)
+func generateMarpFiles(lang string, workDir string) error {
+	slideFile := filepath.Join(workDir, fmt.Sprintf("slide-%s.md", lang))
+	distDir := filepath.Join(workDir, "dist", lang)
 
 	// Generate PDF
 	pdfOutput := filepath.Join(distDir, fmt.Sprintf("slide-%s.pdf", lang))

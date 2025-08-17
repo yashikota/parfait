@@ -13,12 +13,13 @@ var (
 	ttsFlag   = flag.Bool("tts", false, "Generate TTS from notes")
 	videoFlag = flag.Bool("video", false, "Create videos from slides and audio")
 	marpFlag  = flag.Bool("marp", false, "Generate slides, images, and notes using Marp")
+	workDir   string // Working directory for processing
 )
 
 // runVideoCreation handles the video creation workflow
-func runVideoCreation() error {
+func runVideoCreation(workDir string) error {
 	// Check if dist directory exists
-	distDir := "dist"
+	distDir := filepath.Join(workDir, "dist")
 	if _, err := os.Stat(distDir); os.IsNotExist(err) {
 		return fmt.Errorf("dist directory '%s' does not exist. Run TTS generation first", distDir)
 	}
@@ -102,26 +103,26 @@ func runVideoCreation() error {
 	return nil
 }
 
-func run(ctx context.Context) error {
+func run(ctx context.Context, workDir string) error {
 	// If no flags are provided, run the default workflow
 	if !*ttsFlag && !*videoFlag && !*marpFlag {
 		fmt.Println("Running complete workflow: Marp + TTS generation + Video creation")
 
 		// Step 1: Generate Marp files
 		fmt.Println("\n=== Step 1: Marp Generation ===")
-		if err := runMarpGeneration(); err != nil {
+		if err := runMarpGeneration(workDir); err != nil {
 			return fmt.Errorf("marp generation failed: %v", err)
 		}
 
 		// Step 2: Generate TTS
 		fmt.Println("\n=== Step 2: TTS Generation ===")
-		if err := runTTSGeneration(ctx); err != nil {
+		if err := runTTSGeneration(ctx, workDir); err != nil {
 			return fmt.Errorf("TTS generation failed: %v", err)
 		}
 
 		// Step 3: Create videos
 		fmt.Println("\n=== Step 3: Video Creation ===")
-		if err := runVideoCreation(); err != nil {
+		if err := runVideoCreation(workDir); err != nil {
 			return fmt.Errorf("video creation failed: %v", err)
 		}
 
@@ -131,19 +132,19 @@ func run(ctx context.Context) error {
 
 	// Handle individual flags
 	if *marpFlag {
-		if err := runMarpGeneration(); err != nil {
+		if err := runMarpGeneration(workDir); err != nil {
 			return fmt.Errorf("marp generation failed: %v", err)
 		}
 	}
 
 	if *videoFlag {
-		if err := runVideoCreation(); err != nil {
+		if err := runVideoCreation(workDir); err != nil {
 			return fmt.Errorf("video creation failed: %v", err)
 		}
 	}
 
 	if *ttsFlag {
-		if err := runTTSGeneration(ctx); err != nil {
+		if err := runTTSGeneration(ctx, workDir); err != nil {
 			return fmt.Errorf("TTS generation failed: %v", err)
 		}
 	}
@@ -154,8 +155,22 @@ func run(ctx context.Context) error {
 func main() {
 	flag.Parse()
 
+	// Get working directory from command line args
+	args := flag.Args()
+	workDir := "."
+	if len(args) > 0 {
+		workDir = args[0]
+		// Validate directory exists
+		if info, err := os.Stat(workDir); err != nil {
+			log.Fatalf("Directory '%s' does not exist: %v", workDir, err)
+		} else if !info.IsDir() {
+			log.Fatalf("'%s' is not a directory", workDir)
+		}
+		fmt.Printf("Working in directory: %s\n", workDir)
+	}
+
 	ctx := context.Background()
-	if err := run(ctx); err != nil {
+	if err := run(ctx, workDir); err != nil {
 		log.Fatal(err)
 	}
 }
