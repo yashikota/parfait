@@ -10,10 +10,11 @@ import (
 )
 
 var (
-	ttsFlag   = flag.Bool("tts", false, "Generate TTS from notes")
-	videoFlag = flag.Bool("video", false, "Create videos from slides and audio")
-	marpFlag  = flag.Bool("marp", false, "Generate slides, images, and notes using Marp")
-	workDir   string // Working directory for processing
+	ttsFlag    = flag.Bool("tts", false, "Generate TTS from notes")
+	videoFlag  = flag.Bool("video", false, "Create videos from slides and audio")
+	marpFlag   = flag.Bool("marp", false, "Generate slides, images, and notes using Marp")
+	geminiFlag = flag.Bool("gemini", false, "Use Gemini API for TTS (default: use local TTS)")
+	workDir    string // Working directory for processing
 )
 
 // runVideoCreation handles the video creation workflow
@@ -116,7 +117,7 @@ func run(ctx context.Context, workDir string) error {
 
 		// Step 2: Generate TTS
 		fmt.Println("\n=== Step 2: TTS Generation ===")
-		if err := runTTSGeneration(ctx, workDir); err != nil {
+		if err := runTTSGeneration(ctx, workDir, *geminiFlag); err != nil {
 			return fmt.Errorf("TTS generation failed: %v", err)
 		}
 
@@ -144,7 +145,7 @@ func run(ctx context.Context, workDir string) error {
 	}
 
 	if *ttsFlag {
-		if err := runTTSGeneration(ctx, workDir); err != nil {
+		if err := runTTSGeneration(ctx, workDir, *geminiFlag); err != nil {
 			return fmt.Errorf("TTS generation failed: %v", err)
 		}
 	}

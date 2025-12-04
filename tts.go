@@ -1,12 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/joho/godotenv"
 	"google.golang.org/genai"
@@ -117,12 +122,112 @@ func writeWAVFile(filename string, pcmData []byte, channels, sampleRate, bitsPer
 	return err
 }
 
-// runTTSGeneration handles TTS generation from notes files
-func runTTSGeneration(ctx context.Context, workDir string) error {
-	// Initialize API key manager
-	keyManager, err := NewAPIKeyManager()
+// checkLocalTTSHealth checks if local TTS service is available
+func checkLocalTTSHealth(url string, language string) error {
+	healthURL := fmt.Sprintf("%s/health", url)
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+	}
+	resp, err := client.Get(healthURL)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to connect to %s TTS service at %s: %v", language, url, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("%s TTS service at %s returned status %d", language, url, resp.StatusCode)
+	}
+
+	fmt.Printf("✓ %s TTS service is available at %s\n", language, url)
+	return nil
+}
+
+// generateLocalTTS generates TTS using local TTS service (KokoVox)
+func generateLocalTTS(ctx context.Context, text, language string) ([]byte, error) {
+	// Get TTS service URL based on language
+	var baseURL string
+	if language == "ja" {
+		baseURL = os.Getenv("VOICEVOX_URL")
+		if baseURL == "" {
+			baseURL = "http://localhost:50021"
+		}
+	} else {
+		baseURL = os.Getenv("KOKORO_URL")
+		if baseURL == "" {
+			baseURL = "http://localhost:8880"
+		}
+	}
+
+	// Prepare request body
+	requestBody := map[string]interface{}{
+		"language": language,
+		"text":     text,
+	}
+	jsonData, err := json.Marshal(requestBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %v", err)
+	}
+
+	// Make HTTP request
+	apiURL := fmt.Sprintf("%s/v1/audio/speech", baseURL)
+	req, err := http.NewRequestWithContext(ctx, "POST", apiURL, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to call TTS API: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("TTS API returned status %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	// Read audio data
+	audioData, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read audio data: %v", err)
+	}
+
+	return audioData, nil
+}
+
+// runTTSGeneration handles TTS generation from notes files
+func runTTSGeneration(ctx context.Context, workDir string, useGemini bool) error {
+	var keyManager *APIKeyManager
+	var err error
+
+	if useGemini {
+		// Initialize API key manager only when using Gemini
+		keyManager, err = NewAPIKeyManager()
+		if err != nil {
+			return err
+		}
+	} else {
+		// Check local TTS service health
+		voicevoxURL := os.Getenv("VOICEVOX_URL")
+		if voicevoxURL == "" {
+			voicevoxURL = "http://localhost:50021"
+		}
+		kokoroURL := os.Getenv("KOKORO_URL")
+		if kokoroURL == "" {
+			kokoroURL = "http://localhost:8880"
+		}
+
+		fmt.Println("Checking local TTS services...")
+		if err := checkLocalTTSHealth(voicevoxURL, "Japanese"); err != nil {
+			return fmt.Errorf("Japanese TTS service health check failed: %v", err)
+		}
+		if err := checkLocalTTSHealth(kokoroURL, "English"); err != nil {
+			return fmt.Errorf("English TTS service health check failed: %v", err)
+		}
 	}
 
 	// Create audio output directories
@@ -147,7 +252,7 @@ func runTTSGeneration(ctx context.Context, workDir string) error {
 		jaNotesFile := filepath.Join(workDir, "dist", "ja", "notes-ja.txt")
 		if _, err := os.Stat(jaNotesFile); err == nil {
 			fmt.Println("Processing Japanese notes...")
-			err := processTTSFile(ctx, keyManager, jaNotesFile, jaAudioDir, "ja")
+			err := processTTSFile(ctx, keyManager, jaNotesFile, jaAudioDir, "ja", useGemini)
 			if err != nil {
 				fmt.Printf("Warning: failed to process Japanese notes: %v\n", err)
 			}
@@ -163,7 +268,7 @@ func runTTSGeneration(ctx context.Context, workDir string) error {
 		enNotesFile := filepath.Join(workDir, "dist", "en", "notes-en.txt")
 		if _, err := os.Stat(enNotesFile); err == nil {
 			fmt.Println("Processing English notes...")
-			err := processTTSFile(ctx, keyManager, enNotesFile, enAudioDir, "en")
+			err := processTTSFile(ctx, keyManager, enNotesFile, enAudioDir, "en", useGemini)
 			if err != nil {
 				fmt.Printf("Warning: failed to process English notes: %v\n", err)
 			}
@@ -201,7 +306,7 @@ func runTTSGeneration(ctx context.Context, workDir string) error {
 }
 
 // processTTSFile processes a single notes file for TTS generation
-func processTTSFile(ctx context.Context, keyManager *APIKeyManager, notesFile, outputDir, language string) error {
+func processTTSFile(ctx context.Context, keyManager *APIKeyManager, notesFile, outputDir, language string, useGemini bool) error {
 	// Read notes file
 	content, err := os.ReadFile(notesFile)
 	if err != nil {
@@ -218,89 +323,115 @@ func processTTSFile(ctx context.Context, keyManager *APIKeyManager, notesFile, o
 	for idx, sectionText := range sections {
 		fmt.Printf("[TTS] Processing %s section %d/%d (length: %d chars)\n", language, idx+1, len(sections), len(sectionText))
 
-		// Try all API keys for this section
 		var lastErr error
 		success := false
 
-		for keyAttempt := 0; keyAttempt < len(keyManager.GetAllKeys()); keyAttempt++ {
-			// Get next API key
-			apiKey := keyManager.GetNextKey()
-			keyIndex := (keyManager.index-1+len(keyManager.keys))%len(keyManager.keys) + 1
+		if useGemini {
+			// Use Gemini API
+			// Try all API keys for this section
+			for keyAttempt := 0; keyAttempt < len(keyManager.GetAllKeys()); keyAttempt++ {
+				// Get next API key
+				apiKey := keyManager.GetNextKey()
+				keyIndex := (keyManager.index-1+len(keyManager.keys))%len(keyManager.keys) + 1
 
-			fmt.Printf("  Attempting with API key #%d...\n", keyIndex)
+				fmt.Printf("  Attempting with API key #%d...\n", keyIndex)
 
-			// Create client with current API key
-			client, err := genai.NewClient(ctx, &genai.ClientConfig{
-				APIKey: apiKey,
-			})
-			if err != nil {
-				fmt.Printf("  Error creating client with API key #%d: %v\n", keyIndex, err)
-				lastErr = err
-				continue
-			}
+				// Create client with current API key
+				client, err := genai.NewClient(ctx, &genai.ClientConfig{
+					APIKey: apiKey,
+				})
+				if err != nil {
+					fmt.Printf("  Error creating client with API key #%d: %v\n", keyIndex, err)
+					lastErr = err
+					continue
+				}
 
-			config := &genai.GenerateContentConfig{
-				ResponseModalities: []string{"AUDIO"},
-				SpeechConfig: &genai.SpeechConfig{
-					VoiceConfig: &genai.VoiceConfig{
-						PrebuiltVoiceConfig: &genai.PrebuiltVoiceConfig{
-							VoiceName: "Iapetus",
+				config := &genai.GenerateContentConfig{
+					ResponseModalities: []string{"AUDIO"},
+					SpeechConfig: &genai.SpeechConfig{
+						VoiceConfig: &genai.VoiceConfig{
+							PrebuiltVoiceConfig: &genai.PrebuiltVoiceConfig{
+								VoiceName: "Iapetus",
+							},
 						},
 					},
-				},
-			}
-
-			// Generate content with TTS
-			result, err := client.Models.GenerateContent(ctx, "gemini-2.5-flash-preview-tts", genai.Text(sectionText), config)
-			if err != nil {
-				// Check if it's a retryable error (429, 500, etc.)
-				errStr := err.Error()
-				if strings.Contains(errStr, "429") || strings.Contains(errStr, "500") || strings.Contains(errStr, "503") || strings.Contains(errStr, "quota") || strings.Contains(errStr, "rate") {
-					fmt.Printf("  Rate limit or server error with API key #%d: %v\n", keyIndex, err)
-					lastErr = err
-					continue // Try next API key
-				} else {
-					// Non-retryable error, log and continue to next section
-					fmt.Fprintf(os.Stderr, "Error generating %s TTS for section %d (non-retryable): %v\n", language, idx+1, err)
-					lastErr = err
-					break
 				}
+
+				// Generate content with TTS
+				result, err := client.Models.GenerateContent(ctx, "gemini-2.5-flash-preview-tts", genai.Text(sectionText), config)
+				if err != nil {
+					// Check if it's a retryable error (429, 500, etc.)
+					errStr := err.Error()
+					if strings.Contains(errStr, "429") || strings.Contains(errStr, "500") || strings.Contains(errStr, "503") || strings.Contains(errStr, "quota") || strings.Contains(errStr, "rate") {
+						fmt.Printf("  Rate limit or server error with API key #%d: %v\n", keyIndex, err)
+						lastErr = err
+						continue // Try next API key
+					} else {
+						// Non-retryable error, log and continue to next section
+						fmt.Fprintf(os.Stderr, "Error generating %s TTS for section %d (non-retryable): %v\n", language, idx+1, err)
+						lastErr = err
+						break
+					}
+				}
+
+				// Extract audio data
+				if len(result.Candidates) == 0 || len(result.Candidates[0].Content.Parts) == 0 {
+					fmt.Printf("  No audio data found with API key #%d\n", keyIndex)
+					lastErr = fmt.Errorf("no audio data found")
+					continue
+				}
+
+				part := result.Candidates[0].Content.Parts[0]
+				if part.InlineData == nil || part.InlineData.Data == nil {
+					fmt.Printf("  No inline data found with API key #%d\n", keyIndex)
+					lastErr = fmt.Errorf("no inline data found")
+					continue
+				}
+
+				// Save as WAV file with slide.xxx.wav format
+				outputPath := filepath.Join(outputDir, fmt.Sprintf("slide.%03d.wav", idx+1))
+				err = writeWAVFile(outputPath, part.InlineData.Data, 1, 24000, 16)
+				if err != nil {
+					fmt.Printf("  Error saving WAV file with API key #%d: %v\n", keyIndex, err)
+					lastErr = err
+					continue
+				}
+
+				// Success! Show result and break out of retry loop
+				relPath, _ := filepath.Rel(".", outputPath)
+				fmt.Printf("✓ Saved %s: %s (using API key #%d)\n", language, relPath, keyIndex)
+				success = true
+				break
 			}
 
-			// Extract audio data
-			if len(result.Candidates) == 0 || len(result.Candidates[0].Content.Parts) == 0 {
-				fmt.Printf("  No audio data found with API key #%d\n", keyIndex)
-				lastErr = fmt.Errorf("no audio data found")
-				continue
+			// If all API keys failed for this section
+			if !success {
+				fmt.Fprintf(os.Stderr, "Failed to generate %s TTS for section %d after trying all API keys. Last error: %v\n", language, idx+1, lastErr)
+				// Continue to next section instead of failing completely
 			}
-
-			part := result.Candidates[0].Content.Parts[0]
-			if part.InlineData == nil || part.InlineData.Data == nil {
-				fmt.Printf("  No inline data found with API key #%d\n", keyIndex)
-				lastErr = fmt.Errorf("no inline data found")
+		} else {
+			// Use local TTS
+			audioData, err := generateLocalTTS(ctx, sectionText, language)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error generating %s TTS for section %d: %v\n", language, idx+1, err)
+				lastErr = err
 				continue
 			}
 
 			// Save as WAV file with slide.xxx.wav format
 			outputPath := filepath.Join(outputDir, fmt.Sprintf("slide.%03d.wav", idx+1))
-			err = writeWAVFile(outputPath, part.InlineData.Data, 1, 24000, 16)
+			// Local TTS returns WAV file directly, so we can write it as-is
+			err = os.WriteFile(outputPath, audioData, 0644)
 			if err != nil {
-				fmt.Printf("  Error saving WAV file with API key #%d: %v\n", keyIndex, err)
+				fmt.Fprintf(os.Stderr, "Error saving WAV file: %v\n", err)
 				lastErr = err
 				continue
 			}
 
-			// Success! Show result and break out of retry loop
+			// Success!
 			relPath, _ := filepath.Rel(".", outputPath)
-			fmt.Printf("✓ Saved %s: %s (using API key #%d)\n", language, relPath, keyIndex)
+			fmt.Printf("✓ Saved %s: %s (using local TTS)\n", language, relPath)
 			success = true
-			break
-		}
-
-		// If all API keys failed for this section
-		if !success {
-			fmt.Fprintf(os.Stderr, "Failed to generate %s TTS for section %d after trying all API keys. Last error: %v\n", language, idx+1, lastErr)
-			// Continue to next section instead of failing completely
 		}
 	}
 
