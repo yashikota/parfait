@@ -27,9 +27,13 @@ By default, parfait uses a local TTS service ([KokoVox](https://github.com/yashi
 
 **Prerequisites:**
 
-- KokoVox service must be running
-- Japanese: VOICEVOX (default: `http://localhost:50021`)
-- English: Kokoro (default: `http://localhost:8880`)
+- KokoVox service must be running at `http://localhost:5108` (or set `KOKOVOX_URL` environment variable)
+
+**Environment Variables:**
+
+- `KOKOVOX_URL`: KokoVox service URL (default: `http://localhost:5108`)
+
+The KokoVox service healthcheck is executed at startup by calling `{KOKOVOX_URL}/health`. If the service is not available, an error is returned.
 
 ### Option: Gemini API
 

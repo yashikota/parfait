@@ -105,6 +105,15 @@ func runVideoCreation(workDir string) error {
 }
 
 func run(ctx context.Context, workDir string) error {
+	// Check KokoVox service health if TTS will be used and not using Gemini
+	// Check if TTS will be used (either in default workflow or with --tts flag)
+	willUseTTS := (!*ttsFlag && !*videoFlag && !*marpFlag) || *ttsFlag
+	if willUseTTS && !*geminiFlag {
+		if err := checkKokoVoxHealth(); err != nil {
+			return err
+		}
+	}
+
 	// If no flags are provided, run the default workflow
 	if !*ttsFlag && !*videoFlag && !*marpFlag {
 		fmt.Println("Running complete workflow: Marp + TTS generation + Video creation")

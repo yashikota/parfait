@@ -122,40 +122,37 @@ func writeWAVFile(filename string, pcmData []byte, channels, sampleRate, bitsPer
 	return err
 }
 
-// checkLocalTTSHealth checks if local TTS service is available
-func checkLocalTTSHealth(url string, language string) error {
-	healthURL := fmt.Sprintf("%s/health", url)
+// checkKokoVoxHealth checks if KokoVox service is available
+func checkKokoVoxHealth() error {
+	kokovoxURL := os.Getenv("KOKOVOX_URL")
+	if kokovoxURL == "" {
+		kokovoxURL = "http://localhost:5108"
+	}
+
+	healthURL := fmt.Sprintf("%s/health", kokovoxURL)
 	client := &http.Client{
 		Timeout: 5 * time.Second,
 	}
 	resp, err := client.Get(healthURL)
 	if err != nil {
-		return fmt.Errorf("failed to connect to %s TTS service at %s: %v", language, url, err)
+		return fmt.Errorf("failed to connect to KokoVox service at %s: %v", kokovoxURL, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("%s TTS service at %s returned status %d", language, url, resp.StatusCode)
+		return fmt.Errorf("KokoVox service at %s returned status %d", kokovoxURL, resp.StatusCode)
 	}
 
-	fmt.Printf("✓ %s TTS service is available at %s\n", language, url)
+	fmt.Printf("✓ KokoVox service is available at %s\n", kokovoxURL)
 	return nil
 }
 
 // generateLocalTTS generates TTS using local TTS service (KokoVox)
 func generateLocalTTS(ctx context.Context, text, language string) ([]byte, error) {
-	// Get TTS service URL based on language
-	var baseURL string
-	if language == "ja" {
-		baseURL = os.Getenv("VOICEVOX_URL")
-		if baseURL == "" {
-			baseURL = "http://localhost:50021"
-		}
-	} else {
-		baseURL = os.Getenv("KOKORO_URL")
-		if baseURL == "" {
-			baseURL = "http://localhost:8880"
-		}
+	// Get KokoVox service URL
+	baseURL := os.Getenv("KOKOVOX_URL")
+	if baseURL == "" {
+		baseURL = "http://localhost:5108"
 	}
 
 	// Prepare request body
@@ -209,24 +206,6 @@ func runTTSGeneration(ctx context.Context, workDir string, useGemini bool) error
 		keyManager, err = NewAPIKeyManager()
 		if err != nil {
 			return err
-		}
-	} else {
-		// Check local TTS service health
-		voicevoxURL := os.Getenv("VOICEVOX_URL")
-		if voicevoxURL == "" {
-			voicevoxURL = "http://localhost:50021"
-		}
-		kokoroURL := os.Getenv("KOKORO_URL")
-		if kokoroURL == "" {
-			kokoroURL = "http://localhost:8880"
-		}
-
-		fmt.Println("Checking local TTS services...")
-		if err := checkLocalTTSHealth(voicevoxURL, "Japanese"); err != nil {
-			return fmt.Errorf("Japanese TTS service health check failed: %v", err)
-		}
-		if err := checkLocalTTSHealth(kokoroURL, "English"); err != nil {
-			return fmt.Errorf("English TTS service health check failed: %v", err)
 		}
 	}
 
