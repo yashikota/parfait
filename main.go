@@ -2,34 +2,43 @@ package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/spf13/cobra"
 )
 
 var (
-	geminiFlag   = flag.Bool("gemini", false, "Use Gemini API for TTS (default: use local TTS)")
-	languageFlag = flag.String("lang", "", "Language for TTS (ja/en) [required]")
-	outputFlag   = flag.String("output", "", "Output directory for WAV files (default: same directory as input file)")
+	geminiFlag   bool
+	languageFlag string
+	outputFlag   string
 )
 
-func run(ctx context.Context) error {
-	args := flag.Args()
-	if len(args) == 0 {
-		return fmt.Errorf("usage: parfait [options] <markdown-file>\n\nOptions:\n  -gemini   Use Gemini API for TTS (default: use local TTS)\n  -lang     Language for TTS (ja/en) [required]\n  -output   Output directory for WAV files")
-	}
+var rootCmd = &cobra.Command{
+	Use:   "parfait <markdown-file>",
+	Short: "Generate TTS audio from markdown slides",
+	Long: `Parfait generates Text-to-Speech audio files from markdown presentation files.
+Each slide's HTML comments (<!-- -->) are converted to speech.`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return run(cmd.Context(), args[0])
+	},
+}
 
-	mdFile := args[0]
+func init() {
+	rootCmd.Flags().BoolVarP(&geminiFlag, "gemini", "g", false, "Use Gemini API for TTS (default: use local TTS)")
+	rootCmd.Flags().StringVarP(&languageFlag, "lang", "l", "", "Language for TTS (ja/en)")
+	rootCmd.Flags().StringVarP(&outputFlag, "output", "o", "", "Output directory for WAV files (default: same directory as input file)")
 
+	rootCmd.MarkFlagRequired("lang")
+}
+
+func run(ctx context.Context, mdFile string) error {
 	// Validate language flag
-	if *languageFlag == "" {
-		return fmt.Errorf("-lang is required. Specify ja or en")
-	}
-	if *languageFlag != "ja" && *languageFlag != "en" {
-		return fmt.Errorf("invalid language: %s. Use ja or en", *languageFlag)
+	if languageFlag != "ja" && languageFlag != "en" {
+		return fmt.Errorf("invalid language: %s. Use ja or en", languageFlag)
 	}
 
 	// Validate markdown file exists
@@ -43,13 +52,13 @@ func run(ctx context.Context) error {
 	}
 
 	// Determine output directory
-	outputDir := *outputFlag
+	outputDir := outputFlag
 	if outputDir == "" {
 		outputDir = filepath.Dir(mdFile)
 	}
 
 	// Check KokoVox service health if using local TTS
-	if !*geminiFlag {
+	if !geminiFlag {
 		if err := checkKokoVoxHealth(); err != nil {
 			return err
 		}
@@ -57,10 +66,10 @@ func run(ctx context.Context) error {
 
 	fmt.Printf("Processing: %s\n", mdFile)
 	fmt.Printf("Output directory: %s\n", outputDir)
-	fmt.Printf("Language: %s\n", *languageFlag)
+	fmt.Printf("Language: %s\n", languageFlag)
 
 	// Run TTS generation
-	if err := runTTSGeneration(ctx, mdFile, outputDir, *languageFlag, *geminiFlag); err != nil {
+	if err := runTTSGeneration(ctx, mdFile, outputDir, languageFlag, geminiFlag); err != nil {
 		return fmt.Errorf("TTS generation failed: %v", err)
 	}
 
@@ -68,10 +77,8 @@ func run(ctx context.Context) error {
 }
 
 func main() {
-	flag.Parse()
-
 	ctx := context.Background()
-	if err := run(ctx); err != nil {
-		log.Fatal(err)
+	if err := rootCmd.ExecuteContext(ctx); err != nil {
+		os.Exit(1)
 	}
 }
