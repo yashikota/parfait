@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
@@ -17,7 +16,9 @@ import (
 	"github.com/go-audio/wav"
 	"github.com/joho/godotenv"
 	"github.com/yuin/goldmark"
+	"github.com/yuin/goldmark/ast"
 	"github.com/yuin/goldmark/parser"
+	"github.com/yuin/goldmark/text"
 	"go.abhg.dev/goldmark/frontmatter"
 	"google.golang.org/genai"
 )
@@ -241,79 +242,132 @@ func stripFrontmatter(content string) string {
 	return content
 }
 
-// extractNotesFromMarkdown extracts HTML comments from a Markdown file
-// Each slide is separated by "---" and comments are in <!-- --> format
+// slideInfo holds parsed information for a single slide
+type slideInfo struct {
+	title    string
+	comments []string
+	nodes    []ast.Node
+}
+
+// extractNotesFromMarkdown extracts HTML comments from a Markdown file using goldmark AST
+// Each slide is separated by "---" (ThematicBreak) and comments are in <!-- --> format
 // Returns an error if any slide is missing a comment
 func extractNotesFromMarkdown(content []byte) ([]SlideNote, error) {
-	// Parse markdown to strip frontmatter
+	// Strip frontmatter first
 	body, err := parseMarkdown(content)
 	if err != nil {
 		return nil, err
 	}
+	source := []byte(body)
+
+	// Parse markdown into AST
+	md := goldmark.New()
+	reader := text.NewReader(source)
+	doc := md.Parser().Parse(reader)
+
+	// Split nodes by ThematicBreak (---) into slides
+	slides := splitNodesByThematicBreak(doc, source)
 
 	var notes []SlideNote
-
-	// Split by --- (slide separator)
-	slides := splitBySlides(body)
-
-	// Regex to extract HTML comments
-	commentRegex := regexp.MustCompile(`<!--\s*([\s\S]*?)\s*-->`)
-
 	for i, slide := range slides {
-		// Find all comments in this slide
-		matches := commentRegex.FindAllStringSubmatch(slide, -1)
-		var comments []string
-		if len(matches) > 0 {
-			// Combine all comments for this slide
-			for _, match := range matches {
-				if len(match) > 1 && strings.TrimSpace(match[1]) != "" {
-					comments = append(comments, strings.TrimSpace(match[1]))
-				}
+		if len(slide.comments) == 0 {
+			title := slide.title
+			if title == "" {
+				title = "(no title)"
 			}
-		}
-
-		if len(comments) == 0 {
-			return nil, fmt.Errorf("slide %d has no comment. All slides must have a <!-- --> comment", i+1)
+			return nil, fmt.Errorf("slide %d (%s) has no comment. All slides must have a <!-- --> comment", i+1, title)
 		}
 
 		notes = append(notes, SlideNote{
 			SlideNumber: i + 1,
-			Note:        strings.Join(comments, "\n"),
+			Note:        strings.Join(slide.comments, "\n"),
 		})
 	}
 
 	return notes, nil
 }
 
-// splitBySlides splits markdown content by "---" slide separator
-func splitBySlides(content string) []string {
-	var slides []string
-	var currentSlide strings.Builder
+// splitNodesByThematicBreak splits AST nodes by ThematicBreak into slides
+// and extracts title and comments for each slide
+func splitNodesByThematicBreak(doc ast.Node, source []byte) []slideInfo {
+	var slides []slideInfo
+	current := slideInfo{}
 
-	lines := strings.Split(content, "\n")
-	for _, line := range lines {
-		trimmedLine := strings.TrimSpace(line)
-
-		// Check for slide separator
-		if trimmedLine == "---" {
-			slideContent := currentSlide.String()
-			if strings.TrimSpace(slideContent) != "" {
-				slides = append(slides, slideContent)
+	for child := doc.FirstChild(); child != nil; child = child.NextSibling() {
+		switch n := child.(type) {
+		case *ast.ThematicBreak:
+			// Save current slide and start new one
+			if len(current.nodes) > 0 || current.title != "" || len(current.comments) > 0 {
+				slides = append(slides, current)
 			}
-			currentSlide.Reset()
-		} else {
-			currentSlide.WriteString(line)
-			currentSlide.WriteString("\n")
+			current = slideInfo{}
+		case *ast.Heading:
+			if n.Level <= 2 && current.title == "" {
+				current.title = extractHeadingText(n, source)
+			}
+			current.nodes = append(current.nodes, child)
+		case *ast.HTMLBlock:
+			// Extract comment content from HTML block
+			comment := extractHTMLComment(n, source)
+			if comment != "" {
+				current.comments = append(current.comments, comment)
+			}
+			current.nodes = append(current.nodes, child)
+		default:
+			current.nodes = append(current.nodes, child)
 		}
 	}
 
 	// Add last slide
-	lastSlide := currentSlide.String()
-	if strings.TrimSpace(lastSlide) != "" {
-		slides = append(slides, lastSlide)
+	if len(current.nodes) > 0 || current.title != "" || len(current.comments) > 0 {
+		slides = append(slides, current)
 	}
 
 	return slides
+}
+
+// extractHeadingText extracts text content from a heading node
+func extractHeadingText(heading *ast.Heading, source []byte) string {
+	var buf bytes.Buffer
+	for child := heading.FirstChild(); child != nil; child = child.NextSibling() {
+		if textNode, ok := child.(*ast.Text); ok {
+			buf.Write(textNode.Segment.Value(source))
+		}
+	}
+	return buf.String()
+}
+
+// extractHTMLComment extracts comment content from an HTML block
+// Returns empty string if not a comment
+func extractHTMLComment(block *ast.HTMLBlock, source []byte) string {
+	// Only process comment blocks (HTMLBlockType2)
+	if block.HTMLBlockType != ast.HTMLBlockType2 {
+		return ""
+	}
+
+	// Get the raw HTML content
+	var buf bytes.Buffer
+	for i := 0; i < block.Lines().Len(); i++ {
+		line := block.Lines().At(i)
+		buf.Write(line.Value(source))
+	}
+	html := buf.String()
+
+	// Extract content between <!-- and -->
+	html = strings.TrimSpace(html)
+	if !strings.HasPrefix(html, "<!--") {
+		return ""
+	}
+
+	// Remove opening <!--
+	content := html[4:]
+
+	// Remove closing --> if present
+	if idx := strings.Index(content, "-->"); idx != -1 {
+		content = content[:idx]
+	}
+
+	return strings.TrimSpace(content)
 }
 
 // runTTSGeneration handles TTS generation from markdown file
