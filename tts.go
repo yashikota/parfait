@@ -207,14 +207,14 @@ type slideInfo struct {
 // Each slide is separated by "---" (ThematicBreak) and comments are in <!-- --> format
 // Returns an error if any slide is missing a comment
 func extractNotesFromMarkdown(content []byte) ([]SlideNote, error) {
-	// goldmark/frontmatterエクステンションを使ってMarkdownをパースします。
-	// これにより、フロントマターは自動的に処理され、ASTから除外されます。
+	// Parse Markdown using the goldmark/frontmatter extension.
+	// This automatically processes the front matter and excludes it from the AST.
 	md := goldmark.New(
 		goldmark.WithExtensions(
 			&frontmatter.Extender{},
 		),
 	)
-	source := content // 後でテキストを抽出するために元のコンテンツを保持します
+	source := content
 	reader := text.NewReader(source)
 	doc := md.Parser().Parse(reader)
 
@@ -309,20 +309,11 @@ func extractHTMLComment(block *ast.HTMLBlock, source []byte) string {
 	html := buf.String()
 
 	// Extract content between <!-- and -->
-	html = strings.TrimSpace(html)
-	if !strings.HasPrefix(html, "<!--") {
+	trimmed := strings.TrimSpace(html)
+	if !(strings.HasPrefix(trimmed, "<!--") && strings.HasSuffix(trimmed, "-->")) {
 		return ""
 	}
-
-	// Remove opening <!--
-	content := html[4:]
-
-	// Remove closing --> if present
-	if idx := strings.Index(content, "-->"); idx != -1 {
-		content = content[:idx]
-	}
-
-	return strings.TrimSpace(content)
+	return strings.TrimSpace(trimmed[4 : len(trimmed)-3])
 }
 
 // runTTSGeneration handles TTS generation from markdown file

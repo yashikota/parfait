@@ -1,6 +1,6 @@
 module github.com/yashikota/parfait
 
-go 1.25.3
+go 1.24.0
 
 require (
 	github.com/go-audio/audio v1.0.0
