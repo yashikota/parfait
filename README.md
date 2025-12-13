@@ -1,49 +1,78 @@
 # parfait
 
-## Install
+Markdownスライドからスピーカーノートを抽出してTTS音声ファイルを生成するツール
+
+## インストール
 
 ```sh
 go install github.com/yashikota/parfait@latest
 ```
 
-## Usage
+## 使い方
 
 ```sh
-parfait ./hoge/
+parfait -lang ja slide.md
+parfait -lang en -gemini slide.md
+parfait -lang ja -output ./dist slide.md
 ```
 
-## Flags
+## フラグ
 
-- `--marp`: Generate Marp files only
-- `--tts`: Generate TTS only
-- `--video`: Create videos only
-- `--gemini`: Use Gemini API for TTS generation (default: use local TTS)
+- `-lang`: 言語指定 (ja/en) **[必須]**
+- `-gemini`: Gemini APIを使用 (デフォルト: ローカルTTS)
+- `-output`: 出力ディレクトリ (デフォルト: 入力ファイルと同じディレクトリ)
+
+## Markdownフォーマット
+
+```markdown
+---
+title: プレゼンテーションタイトル
+---
+
+# スライド1
+
+<!--
+このコメントがTTSで読み上げられます
+-->
+
+---
+
+# スライド2
+
+<!--
+2枚目のスライドのナレーション
+-->
+```
+
+**出力:**
+- `001.wav` (スライド1のコメント)
+- `002.wav` (スライド2のコメント)
+
+※ すべてのスライドにコメントが必要です（コメントがないスライドがあるとエラー）
 
 ## TTS (Text-to-Speech)
 
-### Default: Local TTS (KokoVox)
+### デフォルト: ローカルTTS (KokoVox)
 
-By default, parfait uses a local TTS service ([KokoVox](https://github.com/yashikota/kokovox)).
+デフォルトではローカルTTSサービス ([KokoVox](https://github.com/yashikota/kokovox)) を使用します。
 
-**Prerequisites:**
+**前提条件:**
 
-- KokoVox service must be running at `http://localhost:5108` (or set `KOKOVOX_URL` environment variable)
+- KokoVoxが `http://localhost:5108` で起動していること（または `KOKOVOX_URL` 環境変数で指定）
 
-**Environment Variables:**
+**環境変数:**
 
-- `KOKOVOX_URL`: KokoVox service URL (default: `http://localhost:5108`)
+- `KOKOVOX_URL`: KokoVoxサービスのURL (デフォルト: `http://localhost:5108`)
 
-The KokoVox service healthcheck is executed at startup by calling `{KOKOVOX_URL}/health`. If the service is not available, an error is returned.
+### オプション: Gemini API
 
-### Option: Gemini API
-
-To use Gemini API, specify the `--gemini` flag.
+Gemini APIを使用する場合は `-gemini` フラグを指定します。
 
 ```sh
-parfait --gemini ./hoge/
+parfait -lang ja -gemini slide.md
 ```
 
-**Prerequisites:**
+**前提条件:**
 
-- Set `GOOGLE_API_KEY` environment variable or in `.env` file
-- Multiple API keys can be set using `GOOGLE_API_KEY_1`, `GOOGLE_API_KEY_2`, etc.
+- `GOOGLE_API_KEY` 環境変数または `.env` ファイルで設定
+- 複数のAPIキーを使用する場合は `GOOGLE_API_KEY_1`, `GOOGLE_API_KEY_2` のように設定可能

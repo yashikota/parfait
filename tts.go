@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,7 +12,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/joho/godotenv"
+	"github.com/go-audio/audio"
+	"github.com/go-audio/wav"
+	"github.com/yuin/goldmark"
+	"github.com/yuin/goldmark/ast"
+	"github.com/yuin/goldmark/text"
+	"go.abhg.dev/goldmark/frontmatter"
 	"google.golang.org/genai"
 )
 
@@ -25,12 +29,6 @@ type APIKeyManager struct {
 
 // NewAPIKeyManager creates a new API key manager with rotation
 func NewAPIKeyManager() (*APIKeyManager, error) {
-	// Load .env file to pick up API keys
-	if err := godotenv.Load(); err != nil {
-		// .env file is optional, so don't fail if it doesn't exist
-		fmt.Printf("Warning: Could not load .env file: %v\n", err)
-	}
-
 	var keys []string
 
 	// Check for multiple API keys (GOOGLE_API_KEY_1, GOOGLE_API_KEY_2, etc.)
@@ -68,9 +66,14 @@ func (m *APIKeyManager) GetAllKeys() []string {
 	return m.keys
 }
 
-// ResetIndex resets the key index to 0
-func (m *APIKeyManager) ResetIndex() {
-	m.index = 0
+const defaultKokoVoxURL = "http://localhost:5108"
+
+// getKokoVoxURL returns the KokoVox service URL from environment or default
+func getKokoVoxURL() string {
+	if url := os.Getenv("KOKOVOX_URL"); url != "" {
+		return url
+	}
+	return defaultKokoVoxURL
 }
 
 // writeWAVFile saves raw PCM bytes as a WAV file with 1 second of silence added at the end
@@ -81,54 +84,50 @@ func writeWAVFile(filename string, pcmData []byte, channels, sampleRate, bitsPer
 	}
 	defer file.Close()
 
-	// Add 1 second of silence (zeros) to the end of the audio
-	silenceDuration := 1.0 // 1 second
-	silenceSamples := int(float64(sampleRate) * silenceDuration)
-	silenceBytes := silenceSamples * channels * (bitsPerSample / 8)
-	silenceData := make([]byte, silenceBytes)
-	// silenceData is already zero-filled by default
+	// Convert PCM bytes to int samples
+	bytesPerSample := bitsPerSample / 8
+	numSamples := len(pcmData) / bytesPerSample
 
-	// Combine original audio with silence
-	combinedData := append(pcmData, silenceData...)
+	// Add 1 second of silence
+	silenceSamples := sampleRate * channels
+	totalSamples := numSamples + silenceSamples
 
-	// Calculate sizes with the added silence
-	dataSize := len(combinedData)
-	fileSize := 36 + dataSize
+	// Create audio buffer
+	buf := &audio.IntBuffer{
+		Data: make([]int, totalSamples),
+		Format: &audio.Format{
+			SampleRate:  sampleRate,
+			NumChannels: channels,
+		},
+	}
 
-	// Write WAV header
-	// "RIFF" chunk descriptor
-	file.WriteString("RIFF")
-	binary.Write(file, binary.LittleEndian, uint32(fileSize))
-	file.WriteString("WAVE")
+	// Convert PCM data to int samples (16-bit signed little-endian)
+	for i := 0; i < numSamples; i++ {
+		offset := i * bytesPerSample
+		if bitsPerSample == 16 {
+			sample := int16(pcmData[offset]) | int16(pcmData[offset+1])<<8
+			buf.Data[i] = int(sample)
+		} else if bitsPerSample == 8 {
+			buf.Data[i] = int(pcmData[offset]) - 128 // 8-bit is unsigned
+		}
+	}
+	// Silence samples are already 0 (zero-initialized)
 
-	// "fmt " sub-chunk
-	file.WriteString("fmt ")
-	binary.Write(file, binary.LittleEndian, uint32(16))         // Sub-chunk size
-	binary.Write(file, binary.LittleEndian, uint16(1))          // Audio format (PCM)
-	binary.Write(file, binary.LittleEndian, uint16(channels))   // Number of channels
-	binary.Write(file, binary.LittleEndian, uint32(sampleRate)) // Sample rate
-	byteRate := sampleRate * channels * bitsPerSample / 8
-	binary.Write(file, binary.LittleEndian, uint32(byteRate)) // Byte rate
-	blockAlign := channels * bitsPerSample / 8
-	binary.Write(file, binary.LittleEndian, uint16(blockAlign))    // Block align
-	binary.Write(file, binary.LittleEndian, uint16(bitsPerSample)) // Bits per sample
+	// Create WAV encoder
+	enc := wav.NewEncoder(file, sampleRate, bitsPerSample, channels, 1) // 1 = PCM format
+	defer enc.Close()
 
-	// "data" sub-chunk
-	file.WriteString("data")
-	binary.Write(file, binary.LittleEndian, uint32(dataSize))
+	// Write audio data
+	if err := enc.Write(buf); err != nil {
+		return fmt.Errorf("failed to write audio data: %v", err)
+	}
 
-	// Write combined PCM data (original + silence)
-	_, err = file.Write(combinedData)
-	return err
+	return nil
 }
 
 // checkKokoVoxHealth checks if KokoVox service is available
 func checkKokoVoxHealth() error {
-	kokovoxURL := os.Getenv("KOKOVOX_URL")
-	if kokovoxURL == "" {
-		kokovoxURL = "http://localhost:5108"
-	}
-
+	kokovoxURL := getKokoVoxURL()
 	healthURL := fmt.Sprintf("%s/health", kokovoxURL)
 	client := &http.Client{
 		Timeout: 5 * time.Second,
@@ -149,11 +148,7 @@ func checkKokoVoxHealth() error {
 
 // generateLocalTTS generates TTS using local TTS service (KokoVox)
 func generateLocalTTS(ctx context.Context, text, language string) ([]byte, error) {
-	// Get KokoVox service URL
-	baseURL := os.Getenv("KOKOVOX_URL")
-	if baseURL == "" {
-		baseURL = "http://localhost:5108"
-	}
+	baseURL := getKokoVoxURL()
 
 	// Prepare request body
 	requestBody := map[string]interface{}{
@@ -196,8 +191,127 @@ func generateLocalTTS(ctx context.Context, text, language string) ([]byte, error
 	return audioData, nil
 }
 
-// runTTSGeneration handles TTS generation from notes files
-func runTTSGeneration(ctx context.Context, workDir string, useGemini bool) error {
+// SlideNote represents a slide's note content
+type SlideNote struct {
+	SlideNumber int
+	Note        string
+}
+
+// slideInfo holds parsed information for a single slide
+type slideInfo struct {
+	title    string
+	comments []string
+}
+
+// extractNotesFromMarkdown extracts HTML comments from a Markdown file using goldmark AST
+// Each slide is separated by "---" (ThematicBreak) and comments are in <!-- --> format
+// Returns an error if any slide is missing a comment
+func extractNotesFromMarkdown(content []byte) ([]SlideNote, error) {
+	// Parse Markdown using the goldmark/frontmatter extension.
+	// This automatically processes the front matter and excludes it from the AST.
+	md := goldmark.New(
+		goldmark.WithExtensions(
+			&frontmatter.Extender{},
+		),
+	)
+	source := content
+	reader := text.NewReader(source)
+	doc := md.Parser().Parse(reader)
+
+	// Split nodes by ThematicBreak (---) into slides
+	slides := splitNodesByThematicBreak(doc, source)
+
+	var notes []SlideNote
+	for i, slide := range slides {
+		if len(slide.comments) == 0 {
+			title := slide.title
+			if title == "" {
+				title = "(no title)"
+			}
+			return nil, fmt.Errorf("slide %d (%s) has no comment. All slides must have a <!-- --> comment", i+1, title)
+		}
+
+		notes = append(notes, SlideNote{
+			SlideNumber: i + 1,
+			Note:        strings.Join(slide.comments, "\n"),
+		})
+	}
+
+	return notes, nil
+}
+
+// splitNodesByThematicBreak splits AST nodes by ThematicBreak into slides
+// and extracts title and comments for each slide
+func splitNodesByThematicBreak(doc ast.Node, source []byte) []slideInfo {
+	var slides []slideInfo
+	current := slideInfo{}
+	hasContent := false
+
+	for child := doc.FirstChild(); child != nil; child = child.NextSibling() {
+		switch n := child.(type) {
+		case *ast.ThematicBreak:
+			// Save current slide and start new one
+			if hasContent || current.title != "" || len(current.comments) > 0 {
+				slides = append(slides, current)
+			}
+			current = slideInfo{}
+			hasContent = false
+		case *ast.Heading:
+			if n.Level <= 2 && current.title == "" {
+				current.title = extractHeadingText(n, source)
+			}
+			hasContent = true
+		case *ast.HTMLBlock:
+			// Extract comment content from HTML block
+			comment := extractHTMLComment(n, source)
+			if comment != "" {
+				current.comments = append(current.comments, comment)
+			}
+			hasContent = true
+		default:
+			hasContent = true
+		}
+	}
+
+	// Add last slide
+	if hasContent || current.title != "" || len(current.comments) > 0 {
+		slides = append(slides, current)
+	}
+
+	return slides
+}
+
+// extractHeadingText extracts text content from a heading node
+func extractHeadingText(heading *ast.Heading, source []byte) string {
+	return string(heading.Text(source))
+}
+
+// extractHTMLComment extracts comment content from an HTML block
+// Returns empty string if not a comment
+func extractHTMLComment(block *ast.HTMLBlock, source []byte) string {
+	// Only process comment blocks (HTMLBlockType2)
+	if block.HTMLBlockType != ast.HTMLBlockType2 {
+		return ""
+	}
+
+	// Get the raw HTML content
+	var buf bytes.Buffer
+	for i := 0; i < block.Lines().Len(); i++ {
+		line := block.Lines().At(i)
+		buf.Write(line.Value(source))
+	}
+	html := buf.String()
+
+	// Extract content between <!-- and -->
+	trimmed := strings.TrimSpace(html)
+	if !(strings.HasPrefix(trimmed, "<!--") && strings.HasSuffix(trimmed, "-->")) {
+		return ""
+	}
+	return strings.TrimSpace(trimmed[4 : len(trimmed)-3])
+}
+
+// runTTSGeneration handles TTS generation from markdown file
+func runTTSGeneration(ctx context.Context, mdFile string, outputDir string, language string, useGemini bool) error {
 	var keyManager *APIKeyManager
 	var err error
 
@@ -209,74 +323,44 @@ func runTTSGeneration(ctx context.Context, workDir string, useGemini bool) error
 		}
 	}
 
-	// Create audio output directories
-	jaAudioDir := filepath.Join(workDir, "dist", "ja")
-	enAudioDir := filepath.Join(workDir, "dist", "en")
-	if err := os.MkdirAll(jaAudioDir, 0755); err != nil {
-		return fmt.Errorf("failed to create Japanese audio directory: %v", err)
-	}
-	if err := os.MkdirAll(enAudioDir, 0755); err != nil {
-		return fmt.Errorf("failed to create English audio directory: %v", err)
+	// Read markdown file
+	content, err := os.ReadFile(mdFile)
+	if err != nil {
+		return fmt.Errorf("failed to read markdown file: %v", err)
 	}
 
-	// Use channels for parallel processing
-	type result struct {
-		language string
-		err      error
+	// Create output directory
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		return fmt.Errorf("failed to create output directory: %v", err)
 	}
-	resultChan := make(chan result, 2)
 
-	// Process Japanese notes in parallel
-	go func() {
-		jaNotesFile := filepath.Join(workDir, "dist", "ja", "notes-ja.txt")
-		if _, err := os.Stat(jaNotesFile); err == nil {
-			fmt.Println("Processing Japanese notes...")
-			err := processTTSFile(ctx, keyManager, jaNotesFile, jaAudioDir, "ja", useGemini)
-			if err != nil {
-				fmt.Printf("Warning: failed to process Japanese notes: %v\n", err)
+	// Extract notes from markdown
+	notes, err := extractNotesFromMarkdown(content)
+	if err != nil {
+		return err
+	}
+	if len(notes) == 0 {
+		return fmt.Errorf("no notes found in markdown file. Ensure comments are in <!-- --> format")
+	}
+
+	fmt.Printf("Found %d slides with notes\n", len(notes))
+
+	// Process each note
+	for _, note := range notes {
+		fmt.Printf("[TTS] Processing slide %03d (length: %d chars)\n", note.SlideNumber, len(note.Note))
+
+		outputPath := filepath.Join(outputDir, fmt.Sprintf("%03d.wav", note.SlideNumber))
+
+		if useGemini {
+			if err := generateGeminiTTS(ctx, keyManager, note.Note, outputPath, language, note.SlideNumber); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to generate TTS for slide %03d: %v\n", note.SlideNumber, err)
+				continue
 			}
-			resultChan <- result{"ja", err}
 		} else {
-			fmt.Printf("Japanese notes file not found: %s\n", jaNotesFile)
-			resultChan <- result{"ja", nil}
-		}
-	}()
-
-	// Process English notes in parallel
-	go func() {
-		enNotesFile := filepath.Join(workDir, "dist", "en", "notes-en.txt")
-		if _, err := os.Stat(enNotesFile); err == nil {
-			fmt.Println("Processing English notes...")
-			err := processTTSFile(ctx, keyManager, enNotesFile, enAudioDir, "en", useGemini)
-			if err != nil {
-				fmt.Printf("Warning: failed to process English notes: %v\n", err)
+			if err := generateLocalTTSToFile(ctx, note.Note, outputPath, language, note.SlideNumber); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to generate TTS for slide %03d: %v\n", note.SlideNumber, err)
+				continue
 			}
-			resultChan <- result{"en", err}
-		} else {
-			fmt.Printf("English notes file not found: %s\n", enNotesFile)
-			resultChan <- result{"en", nil}
-		}
-	}()
-
-	// Wait for both processes to complete
-	var jaErr, enErr error
-	for i := 0; i < 2; i++ {
-		res := <-resultChan
-		if res.language == "ja" {
-			jaErr = res.err
-		} else {
-			enErr = res.err
-		}
-	}
-
-	// Report any errors
-	if jaErr != nil || enErr != nil {
-		if jaErr != nil && enErr != nil {
-			return fmt.Errorf("both Japanese and English TTS failed: ja=%v, en=%v", jaErr, enErr)
-		} else if jaErr != nil {
-			fmt.Printf("Warning: Japanese TTS failed: %v\n", jaErr)
-		} else {
-			fmt.Printf("Warning: English TTS failed: %v\n", enErr)
 		}
 	}
 
@@ -284,166 +368,98 @@ func runTTSGeneration(ctx context.Context, workDir string, useGemini bool) error
 	return nil
 }
 
-// processTTSFile processes a single notes file for TTS generation
-func processTTSFile(ctx context.Context, keyManager *APIKeyManager, notesFile, outputDir, language string, useGemini bool) error {
-	// Read notes file
-	content, err := os.ReadFile(notesFile)
-	if err != nil {
-		return fmt.Errorf("failed to read file: %v", err)
-	}
+// generateGeminiTTS generates TTS using Gemini API
+func generateGeminiTTS(ctx context.Context, keyManager *APIKeyManager, text, outputPath, language string, slideNum int) error {
+	var lastErr error
 
-	// Split into sections
-	sections := splitSections(string(content))
-	if len(sections) == 0 {
-		return fmt.Errorf("no sections found in the file. Ensure '---' separators are present")
-	}
+	// Try all API keys for this section
+	for keyAttempt := 0; keyAttempt < len(keyManager.GetAllKeys()); keyAttempt++ {
+		// Get next API key
+		apiKey := keyManager.GetNextKey()
+		keyIndex := (keyManager.index-1+len(keyManager.keys))%len(keyManager.keys) + 1
 
-	// Process each section
-	for idx, sectionText := range sections {
-		fmt.Printf("[TTS] Processing %s section %d/%d (length: %d chars)\n", language, idx+1, len(sections), len(sectionText))
+		fmt.Printf("  Attempting with API key #%d...\n", keyIndex)
 
-		var lastErr error
-		success := false
-
-		if useGemini {
-			// Use Gemini API
-			// Try all API keys for this section
-			for keyAttempt := 0; keyAttempt < len(keyManager.GetAllKeys()); keyAttempt++ {
-				// Get next API key
-				apiKey := keyManager.GetNextKey()
-				keyIndex := (keyManager.index-1+len(keyManager.keys))%len(keyManager.keys) + 1
-
-				fmt.Printf("  Attempting with API key #%d...\n", keyIndex)
-
-				// Create client with current API key
-				client, err := genai.NewClient(ctx, &genai.ClientConfig{
-					APIKey: apiKey,
-				})
-				if err != nil {
-					fmt.Printf("  Error creating client with API key #%d: %v\n", keyIndex, err)
-					lastErr = err
-					continue
-				}
-
-				config := &genai.GenerateContentConfig{
-					ResponseModalities: []string{"AUDIO"},
-					SpeechConfig: &genai.SpeechConfig{
-						VoiceConfig: &genai.VoiceConfig{
-							PrebuiltVoiceConfig: &genai.PrebuiltVoiceConfig{
-								VoiceName: "Iapetus",
-							},
-						},
-					},
-				}
-
-				// Generate content with TTS
-				result, err := client.Models.GenerateContent(ctx, "gemini-2.5-flash-preview-tts", genai.Text(sectionText), config)
-				if err != nil {
-					// Check if it's a retryable error (429, 500, etc.)
-					errStr := err.Error()
-					if strings.Contains(errStr, "429") || strings.Contains(errStr, "500") || strings.Contains(errStr, "503") || strings.Contains(errStr, "quota") || strings.Contains(errStr, "rate") {
-						fmt.Printf("  Rate limit or server error with API key #%d: %v\n", keyIndex, err)
-						lastErr = err
-						continue // Try next API key
-					} else {
-						// Non-retryable error, log and continue to next section
-						fmt.Fprintf(os.Stderr, "Error generating %s TTS for section %d (non-retryable): %v\n", language, idx+1, err)
-						lastErr = err
-						break
-					}
-				}
-
-				// Extract audio data
-				if len(result.Candidates) == 0 || len(result.Candidates[0].Content.Parts) == 0 {
-					fmt.Printf("  No audio data found with API key #%d\n", keyIndex)
-					lastErr = fmt.Errorf("no audio data found")
-					continue
-				}
-
-				part := result.Candidates[0].Content.Parts[0]
-				if part.InlineData == nil || part.InlineData.Data == nil {
-					fmt.Printf("  No inline data found with API key #%d\n", keyIndex)
-					lastErr = fmt.Errorf("no inline data found")
-					continue
-				}
-
-				// Save as WAV file with slide.xxx.wav format
-				outputPath := filepath.Join(outputDir, fmt.Sprintf("slide.%03d.wav", idx+1))
-				err = writeWAVFile(outputPath, part.InlineData.Data, 1, 24000, 16)
-				if err != nil {
-					fmt.Printf("  Error saving WAV file with API key #%d: %v\n", keyIndex, err)
-					lastErr = err
-					continue
-				}
-
-				// Success! Show result and break out of retry loop
-				relPath, _ := filepath.Rel(".", outputPath)
-				fmt.Printf("✓ Saved %s: %s (using API key #%d)\n", language, relPath, keyIndex)
-				success = true
-				break
-			}
-
-			// If all API keys failed for this section
-			if !success {
-				fmt.Fprintf(os.Stderr, "Failed to generate %s TTS for section %d after trying all API keys. Last error: %v\n", language, idx+1, lastErr)
-				// Continue to next section instead of failing completely
-			}
-		} else {
-			// Use local TTS
-			audioData, err := generateLocalTTS(ctx, sectionText, language)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error generating %s TTS for section %d: %v\n", language, idx+1, err)
-				lastErr = err
-				continue
-			}
-
-			// Save as WAV file with slide.xxx.wav format
-			outputPath := filepath.Join(outputDir, fmt.Sprintf("slide.%03d.wav", idx+1))
-			// Local TTS returns WAV file directly, so we can write it as-is
-			err = os.WriteFile(outputPath, audioData, 0644)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error saving WAV file: %v\n", err)
-				lastErr = err
-				continue
-			}
-
-			// Success!
-			relPath, _ := filepath.Rel(".", outputPath)
-			fmt.Printf("✓ Saved %s: %s (using local TTS)\n", language, relPath)
-			success = true
+		// Create client with current API key
+		client, err := genai.NewClient(ctx, &genai.ClientConfig{
+			APIKey: apiKey,
+		})
+		if err != nil {
+			fmt.Printf("  Error creating client with API key #%d: %v\n", keyIndex, err)
+			lastErr = err
+			continue
 		}
+
+		config := &genai.GenerateContentConfig{
+			ResponseModalities: []string{"AUDIO"},
+			SpeechConfig: &genai.SpeechConfig{
+				VoiceConfig: &genai.VoiceConfig{
+					PrebuiltVoiceConfig: &genai.PrebuiltVoiceConfig{
+						VoiceName: "Iapetus",
+					},
+				},
+			},
+		}
+
+		// Generate content with TTS
+		result, err := client.Models.GenerateContent(ctx, "gemini-2.5-flash-preview-tts", genai.Text(text), config)
+		if err != nil {
+			// Check if it's a retryable error (429, 500, etc.)
+			errStr := err.Error()
+			if strings.Contains(errStr, "429") || strings.Contains(errStr, "500") || strings.Contains(errStr, "503") || strings.Contains(errStr, "quota") || strings.Contains(errStr, "rate") {
+				fmt.Printf("  Rate limit or server error with API key #%d: %v\n", keyIndex, err)
+				lastErr = err
+				continue // Try next API key
+			} else {
+				// Non-retryable error
+				return fmt.Errorf("error generating TTS: %v", err)
+			}
+		}
+
+		// Extract audio data
+		if len(result.Candidates) == 0 || len(result.Candidates[0].Content.Parts) == 0 {
+			fmt.Printf("  No audio data found with API key #%d\n", keyIndex)
+			lastErr = fmt.Errorf("no audio data found")
+			continue
+		}
+
+		part := result.Candidates[0].Content.Parts[0]
+		if part.InlineData == nil || part.InlineData.Data == nil {
+			fmt.Printf("  No inline data found with API key #%d\n", keyIndex)
+			lastErr = fmt.Errorf("no inline data found")
+			continue
+		}
+
+		// Save as WAV file
+		err = writeWAVFile(outputPath, part.InlineData.Data, 1, 24000, 16)
+		if err != nil {
+			fmt.Printf("  Error saving WAV file with API key #%d: %v\n", keyIndex, err)
+			lastErr = err
+			continue
+		}
+
+		// Success!
+		fmt.Printf("✓ Saved slide %03d: %s (using API key #%d)\n", slideNum, outputPath, keyIndex)
+		return nil
 	}
 
-	return nil
+	return fmt.Errorf("failed after trying all API keys: %v", lastErr)
 }
 
-// splitSections splits text by lines that consist solely of '---'
-func splitSections(text string) []string {
-	var sections []string
-	var sectionLines []string
-
-	lines := strings.Split(text, "\n")
-	for _, line := range lines {
-		if strings.TrimSpace(line) == "---" {
-			if len(sectionLines) > 0 {
-				section := strings.TrimSpace(strings.Join(sectionLines, "\n"))
-				if section != "" {
-					sections = append(sections, section)
-				}
-				sectionLines = nil
-			}
-		} else {
-			sectionLines = append(sectionLines, line)
-		}
+// generateLocalTTSToFile generates TTS using local service and saves to file
+func generateLocalTTSToFile(ctx context.Context, text, outputPath, language string, slideNum int) error {
+	audioData, err := generateLocalTTS(ctx, text, language)
+	if err != nil {
+		return err
 	}
 
-	// Add last section if any
-	if len(sectionLines) > 0 {
-		section := strings.TrimSpace(strings.Join(sectionLines, "\n"))
-		if section != "" {
-			sections = append(sections, section)
-		}
+	// Local TTS returns WAV file directly, so we can write it as-is
+	err = os.WriteFile(outputPath, audioData, 0644)
+	if err != nil {
+		return fmt.Errorf("error saving WAV file: %v", err)
 	}
 
-	return sections
+	// Success!
+	fmt.Printf("✓ Saved slide %03d: %s (using local TTS)\n", slideNum, outputPath)
+	return nil
 }
