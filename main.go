@@ -79,6 +79,7 @@ func run(ctx context.Context, mdFile string) error {
 func main() {
 	ctx := context.Background()
 	if err := rootCmd.ExecuteContext(ctx); err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }

@@ -17,7 +17,6 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
-	"github.com/yuin/goldmark/parser"
 	"github.com/yuin/goldmark/text"
 	"go.abhg.dev/goldmark/frontmatter"
 	"google.golang.org/genai"
@@ -203,45 +202,6 @@ type SlideNote struct {
 	Note        string
 }
 
-// parseMarkdown parses markdown content and extracts body (without frontmatter)
-func parseMarkdown(content []byte) (string, error) {
-	md := goldmark.New(
-		goldmark.WithExtensions(
-			&frontmatter.Extender{},
-		),
-	)
-
-	ctx := parser.NewContext()
-	var buf bytes.Buffer
-	if err := md.Convert(content, &buf, parser.WithContext(ctx)); err != nil {
-		return "", fmt.Errorf("failed to parse markdown: %v", err)
-	}
-
-	// Get frontmatter data (optional, for future use)
-	_ = frontmatter.Get(ctx)
-
-	// Return original content without frontmatter
-	return stripFrontmatter(string(content)), nil
-}
-
-// stripFrontmatter removes YAML frontmatter from markdown content
-func stripFrontmatter(content string) string {
-	lines := strings.Split(content, "\n")
-	if len(lines) == 0 || strings.TrimSpace(lines[0]) != "---" {
-		return content
-	}
-
-	// Find closing ---
-	for i := 1; i < len(lines); i++ {
-		if strings.TrimSpace(lines[i]) == "---" {
-			// Return content after frontmatter
-			return strings.Join(lines[i+1:], "\n")
-		}
-	}
-
-	return content
-}
-
 // slideInfo holds parsed information for a single slide
 type slideInfo struct {
 	title    string
@@ -253,15 +213,14 @@ type slideInfo struct {
 // Each slide is separated by "---" (ThematicBreak) and comments are in <!-- --> format
 // Returns an error if any slide is missing a comment
 func extractNotesFromMarkdown(content []byte) ([]SlideNote, error) {
-	// Strip frontmatter first
-	body, err := parseMarkdown(content)
-	if err != nil {
-		return nil, err
-	}
-	source := []byte(body)
-
-	// Parse markdown into AST
-	md := goldmark.New()
+	// goldmark/frontmatterエクステンションを使ってMarkdownをパースします。
+	// これにより、フロントマターは自動的に処理され、ASTから除外されます。
+	md := goldmark.New(
+		goldmark.WithExtensions(
+			&frontmatter.Extender{},
+		),
+	)
+	source := content // 後でテキストを抽出するために元のコンテンツを保持します
 	reader := text.NewReader(source)
 	doc := md.Parser().Parse(reader)
 
