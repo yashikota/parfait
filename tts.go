@@ -283,13 +283,7 @@ func splitNodesByThematicBreak(doc ast.Node, source []byte) []slideInfo {
 
 // extractHeadingText extracts text content from a heading node
 func extractHeadingText(heading *ast.Heading, source []byte) string {
-	var buf bytes.Buffer
-	for child := heading.FirstChild(); child != nil; child = child.NextSibling() {
-		if textNode, ok := child.(*ast.Text); ok {
-			buf.Write(textNode.Segment.Value(source))
-		}
-	}
-	return buf.String()
+	return string(heading.Text(source))
 }
 
 // extractHTMLComment extracts comment content from an HTML block

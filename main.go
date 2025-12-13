@@ -30,7 +30,10 @@ Each slide's HTML comments (<!-- -->) are converted to speech.`,
 
 func init() {
 	// Load .env file (optional)
-	_ = godotenv.Load()
+	if err := godotenv.Load(); err != nil {
+		// .env file is optional, so just log a warning if it fails to load.
+		fmt.Printf("Warning: Error loading .env file: %v\n", err)
+	}
 
 	rootCmd.Flags().BoolVarP(&geminiFlag, "gemini", "g", false, "Use Gemini API for TTS (default: use local TTS)")
 	rootCmd.Flags().StringVarP(&languageFlag, "lang", "l", "", "Language for TTS (ja/en)")
