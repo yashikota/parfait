@@ -14,7 +14,6 @@ import (
 
 	"github.com/go-audio/audio"
 	"github.com/go-audio/wav"
-	"github.com/joho/godotenv"
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
 	"github.com/yuin/goldmark/text"
@@ -30,12 +29,6 @@ type APIKeyManager struct {
 
 // NewAPIKeyManager creates a new API key manager with rotation
 func NewAPIKeyManager() (*APIKeyManager, error) {
-	// Load .env file to pick up API keys
-	if err := godotenv.Load(); err != nil {
-		// .env file is optional, so don't fail if it doesn't exist
-		fmt.Printf("Warning: Could not load .env file: %v\n", err)
-	}
-
 	var keys []string
 
 	// Check for multiple API keys (GOOGLE_API_KEY_1, GOOGLE_API_KEY_2, etc.)
@@ -71,6 +64,16 @@ func (m *APIKeyManager) GetNextKey() string {
 // GetAllKeys returns all available API keys for retry logic
 func (m *APIKeyManager) GetAllKeys() []string {
 	return m.keys
+}
+
+const defaultKokoVoxURL = "http://localhost:5108"
+
+// getKokoVoxURL returns the KokoVox service URL from environment or default
+func getKokoVoxURL() string {
+	if url := os.Getenv("KOKOVOX_URL"); url != "" {
+		return url
+	}
+	return defaultKokoVoxURL
 }
 
 // writeWAVFile saves raw PCM bytes as a WAV file with 1 second of silence added at the end
@@ -124,11 +127,7 @@ func writeWAVFile(filename string, pcmData []byte, channels, sampleRate, bitsPer
 
 // checkKokoVoxHealth checks if KokoVox service is available
 func checkKokoVoxHealth() error {
-	kokovoxURL := os.Getenv("KOKOVOX_URL")
-	if kokovoxURL == "" {
-		kokovoxURL = "http://localhost:5108"
-	}
-
+	kokovoxURL := getKokoVoxURL()
 	healthURL := fmt.Sprintf("%s/health", kokovoxURL)
 	client := &http.Client{
 		Timeout: 5 * time.Second,
@@ -149,11 +148,7 @@ func checkKokoVoxHealth() error {
 
 // generateLocalTTS generates TTS using local TTS service (KokoVox)
 func generateLocalTTS(ctx context.Context, text, language string) ([]byte, error) {
-	// Get KokoVox service URL
-	baseURL := os.Getenv("KOKOVOX_URL")
-	if baseURL == "" {
-		baseURL = "http://localhost:5108"
-	}
+	baseURL := getKokoVoxURL()
 
 	// Prepare request body
 	requestBody := map[string]interface{}{
@@ -206,7 +201,6 @@ type SlideNote struct {
 type slideInfo struct {
 	title    string
 	comments []string
-	nodes    []ast.Node
 }
 
 // extractNotesFromMarkdown extracts HTML comments from a Markdown file using goldmark AST
@@ -251,34 +245,36 @@ func extractNotesFromMarkdown(content []byte) ([]SlideNote, error) {
 func splitNodesByThematicBreak(doc ast.Node, source []byte) []slideInfo {
 	var slides []slideInfo
 	current := slideInfo{}
+	hasContent := false
 
 	for child := doc.FirstChild(); child != nil; child = child.NextSibling() {
 		switch n := child.(type) {
 		case *ast.ThematicBreak:
 			// Save current slide and start new one
-			if len(current.nodes) > 0 || current.title != "" || len(current.comments) > 0 {
+			if hasContent || current.title != "" || len(current.comments) > 0 {
 				slides = append(slides, current)
 			}
 			current = slideInfo{}
+			hasContent = false
 		case *ast.Heading:
 			if n.Level <= 2 && current.title == "" {
 				current.title = extractHeadingText(n, source)
 			}
-			current.nodes = append(current.nodes, child)
+			hasContent = true
 		case *ast.HTMLBlock:
 			// Extract comment content from HTML block
 			comment := extractHTMLComment(n, source)
 			if comment != "" {
 				current.comments = append(current.comments, comment)
 			}
-			current.nodes = append(current.nodes, child)
+			hasContent = true
 		default:
-			current.nodes = append(current.nodes, child)
+			hasContent = true
 		}
 	}
 
 	// Add last slide
-	if len(current.nodes) > 0 || current.title != "" || len(current.comments) > 0 {
+	if hasContent || current.title != "" || len(current.comments) > 0 {
 		slides = append(slides, current)
 	}
 
@@ -409,18 +405,12 @@ func generateGeminiTTS(ctx context.Context, keyManager *APIKeyManager, text, out
 			continue
 		}
 
-		// Select voice based on language
-		voiceName := "Iapetus" // Default English voice
-		if language == "ja" {
-			voiceName = "Iapetus" // Use same voice for now, Gemini handles language automatically
-		}
-
 		config := &genai.GenerateContentConfig{
 			ResponseModalities: []string{"AUDIO"},
 			SpeechConfig: &genai.SpeechConfig{
 				VoiceConfig: &genai.VoiceConfig{
 					PrebuiltVoiceConfig: &genai.PrebuiltVoiceConfig{
-						VoiceName: voiceName,
+						VoiceName: "Iapetus",
 					},
 				},
 			},

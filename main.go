@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/joho/godotenv"
 	"github.com/spf13/cobra"
 )
 
@@ -28,6 +29,9 @@ Each slide's HTML comments (<!-- -->) are converted to speech.`,
 }
 
 func init() {
+	// Load .env file (optional)
+	_ = godotenv.Load()
+
 	rootCmd.Flags().BoolVarP(&geminiFlag, "gemini", "g", false, "Use Gemini API for TTS (default: use local TTS)")
 	rootCmd.Flags().StringVarP(&languageFlag, "lang", "l", "", "Language for TTS (ja/en)")
 	rootCmd.Flags().StringVarP(&outputFlag, "output", "o", "", "Output directory for WAV files (default: same directory as input file)")
