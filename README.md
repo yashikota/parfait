@@ -16,6 +16,19 @@ parfait -lang en -gemini slide.md
 parfait -lang ja -output ./dist slide.md
 ```
 
+## Gemini APIキーをコマンドで設定（グローバル）
+
+Gemini APIを使う場合、環境変数だけでなく **コマンドでグローバル設定**できます。
+
+```sh
+parfait config set api-key YOUR_API_KEY
+parfait config add api-key YOUR_API_KEY_2
+parfait config list api-keys
+parfait config path
+```
+
+設定後は `-gemini` 実行時に自動で読み込まれ、`GOOGLE_API_KEY` として利用されます（すでに環境変数が設定されている場合はそちらが優先されます）。
+
 ## フラグ
 
 - `-lang`: 言語指定 (ja/en) **[必須]**
@@ -74,5 +87,5 @@ parfait -lang ja -gemini slide.md
 
 **前提条件:**
 
-- `GOOGLE_API_KEY` 環境変数または `.env` ファイルで設定
+- `GOOGLE_API_KEY` 環境変数 / `.env` ファイル / `parfait config set api-key ...` のいずれかで設定
 - 複数のAPIキーを使用する場合は `GOOGLE_API_KEY_1`, `GOOGLE_API_KEY_2` のように設定可能

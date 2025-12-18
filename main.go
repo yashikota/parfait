@@ -29,10 +29,16 @@ Each slide's HTML comments (<!-- -->) are converted to speech.`,
 }
 
 func init() {
-	// Load .env file (optional)
-	if err := godotenv.Load(); err != nil {
-		// .env file is optional, so just log a warning if it fails to load.
-		fmt.Printf("Warning: Error loading .env file: %v\n", err)
+	// Load global config first (so local .env or process env can override it)
+	if err := applyGlobalEnvDefaults(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to load global config: %v\n", err)
+	}
+
+	// Load .env file (optional, only if it exists)
+	if _, err := os.Stat(".env"); err == nil {
+		if err := godotenv.Load(); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: Error loading .env file: %v\n", err)
+		}
 	}
 
 	rootCmd.Flags().BoolVarP(&geminiFlag, "gemini", "g", false, "Use Gemini API for TTS (default: use local TTS)")
@@ -40,6 +46,8 @@ func init() {
 	rootCmd.Flags().StringVarP(&outputFlag, "output", "o", "", "Output directory for WAV files (default: same directory as input file)")
 
 	rootCmd.MarkFlagRequired("lang")
+
+	rootCmd.AddCommand(configCmd)
 }
 
 func run(ctx context.Context, mdFile string) error {
