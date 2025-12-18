@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-audio/audio"
@@ -23,6 +24,7 @@ import (
 
 // APIKeyManager manages rotation of multiple API keys
 type APIKeyManager struct {
+	mu    sync.Mutex
 	keys  []string
 	index int
 }
@@ -54,19 +56,30 @@ func NewAPIKeyManager() (*APIKeyManager, error) {
 	return &APIKeyManager{keys: keys, index: 0}, nil
 }
 
-// GetNextKey returns the next API key in rotation
-func (m *APIKeyManager) GetNextKey() string {
+// NextKey returns the next API key in rotation and its 1-based index.
+func (m *APIKeyManager) NextKey() (string, int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	key := m.keys[m.index]
+	keyIndex := m.index + 1
 	m.index = (m.index + 1) % len(m.keys)
-	return key
+	return key, keyIndex
 }
 
-// GetAllKeys returns all available API keys for retry logic
+// KeyCount returns number of available keys. Keys are immutable after construction.
+func (m *APIKeyManager) KeyCount() int {
+	return len(m.keys)
+}
+
+// GetAllKeys returns all available API keys for retry logic (copy).
 func (m *APIKeyManager) GetAllKeys() []string {
-	return m.keys
+	out := make([]string, len(m.keys))
+	copy(out, m.keys)
+	return out
 }
 
 const defaultKokoVoxURL = "http://localhost:5108"
+const defaultTTSConcurrency = 3
 
 // getKokoVoxURL returns the KokoVox service URL from environment or default
 func getKokoVoxURL() string {
@@ -345,24 +358,36 @@ func runTTSGeneration(ctx context.Context, mdFile string, outputDir string, lang
 
 	fmt.Printf("Found %d slides with notes\n", len(notes))
 
-	// Process each note
-	for _, note := range notes {
-		fmt.Printf("[TTS] Processing slide %03d (length: %d chars)\n", note.SlideNumber, len(note.Note))
+	// Process notes concurrently (up to defaultTTSConcurrency at a time)
+	sem := make(chan struct{}, defaultTTSConcurrency)
+	var wg sync.WaitGroup
 
+	for _, note := range notes {
+		note := note // capture
 		outputPath := filepath.Join(outputDir, fmt.Sprintf("%03d.wav", note.SlideNumber))
 
-		if useGemini {
-			if err := generateGeminiTTS(ctx, keyManager, note.Note, outputPath, language, note.SlideNumber); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to generate TTS for slide %03d: %v\n", note.SlideNumber, err)
-				continue
+		sem <- struct{}{}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			fmt.Printf("[TTS] Processing slide %03d (length: %d chars)\n", note.SlideNumber, len(note.Note))
+
+			if useGemini {
+				if err := generateGeminiTTS(ctx, keyManager, note.Note, outputPath, language, note.SlideNumber); err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to generate TTS for slide %03d: %v\n", note.SlideNumber, err)
+				}
+				return
 			}
-		} else {
+
 			if err := generateLocalTTSToFile(ctx, note.Note, outputPath, language, note.SlideNumber); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to generate TTS for slide %03d: %v\n", note.SlideNumber, err)
-				continue
 			}
-		}
+		}()
 	}
+
+	wg.Wait()
 
 	fmt.Println("TTS generation complete!")
 	return nil
@@ -373,10 +398,9 @@ func generateGeminiTTS(ctx context.Context, keyManager *APIKeyManager, text, out
 	var lastErr error
 
 	// Try all API keys for this section
-	for keyAttempt := 0; keyAttempt < len(keyManager.GetAllKeys()); keyAttempt++ {
-		// Get next API key
-		apiKey := keyManager.GetNextKey()
-		keyIndex := (keyManager.index-1+len(keyManager.keys))%len(keyManager.keys) + 1
+	for keyAttempt := 0; keyAttempt < keyManager.KeyCount(); keyAttempt++ {
+		// Get next API key (thread-safe)
+		apiKey, keyIndex := keyManager.NextKey()
 
 		fmt.Printf("  Attempting with API key #%d...\n", keyIndex)
 
